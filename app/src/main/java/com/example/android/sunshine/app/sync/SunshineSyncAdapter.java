@@ -3,6 +3,7 @@ package com.example.android.sunshine.app.sync;
 import android.accounts.Account;
 import android.accounts.AccountManager;
 import android.annotation.SuppressLint;
+import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.AbstractThreadedSyncAdapter;
@@ -42,6 +43,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -49,8 +51,21 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.Date;
 import java.util.Vector;
 import java.util.concurrent.ExecutionException;
+
+import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.common.api.GoogleApiClient.ConnectionCallbacks;
+import com.google.android.gms.common.api.ResultCallback;
+import com.google.android.gms.wearable.Asset;
+import com.google.android.gms.wearable.DataApi;
+import com.google.android.gms.wearable.MessageApi;
+import com.google.android.gms.wearable.Node;
+import com.google.android.gms.wearable.NodeApi;
+import com.google.android.gms.wearable.PutDataMapRequest;
+import com.google.android.gms.wearable.PutDataRequest;
+import com.google.android.gms.wearable.Wearable;
 
 public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
     public final String LOG_TAG = SunshineSyncAdapter.class.getSimpleName();
@@ -87,8 +102,15 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
     public static final int LOCATION_STATUS_UNKNOWN = 3;
     public static final int LOCATION_STATUS_INVALID = 4;
 
+    private GoogleApiClient mGoogleApiClient;
+
     public SunshineSyncAdapter(Context context, boolean autoInitialize) {
         super(context, autoInitialize);
+
+        mGoogleApiClient = new GoogleApiClient.Builder(context)
+                                .addApi(Wearable.API)
+                                .build();
+        mGoogleApiClient.connect();
     }
 
     @Override
@@ -403,15 +425,16 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
         //checking the last update and notify if it' the first of the day
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
         String displayNotificationsKey = context.getString(R.string.pref_enable_notifications_key);
-        boolean displayNotifications = prefs.getBoolean(displayNotificationsKey,
-                Boolean.parseBoolean(context.getString(R.string.pref_enable_notifications_default)));
+        boolean displayNotifications = true;
+//        prefs.getBoolean(displayNotificationsKey,
+//                Boolean.parseBoolean(context.getString(R.string.pref_enable_notifications_default)));
 
         if ( displayNotifications ) {
 
             String lastNotificationKey = context.getString(R.string.pref_last_notification);
             long lastSync = prefs.getLong(lastNotificationKey, 0);
 
-            if (System.currentTimeMillis() - lastSync >= DAY_IN_MILLIS) {
+            //if (System.currentTimeMillis() - lastSync >= DAY_IN_MILLIS) {
                 // Last sync was more than 1 day ago, let's send a notification with the weather.
                 String locationQuery = Utility.getPreferredLocation(context);
 
@@ -442,8 +465,17 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                             ? resources.getDimensionPixelSize(android.R.dimen.notification_large_icon_height)
                             : resources.getDimensionPixelSize(R.dimen.notification_large_icon_default);
 
+                    @SuppressLint("InlinedApi")
+                    int smallIconWidth = Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB
+                            ? resources.getDimensionPixelSize(android.R.dimen.thumbnail_width)
+                            : resources.getDimensionPixelSize(android.R.dimen.thumbnail_width);
+                    @SuppressLint("InlinedApi")
+                    int smallIconHeight = Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB
+                            ? resources.getDimensionPixelSize(android.R.dimen.thumbnail_height)
+                            : resources.getDimensionPixelSize(android.R.dimen.thumbnail_height);
                     // Retrieve the large icon
                     Bitmap largeIcon;
+                    Bitmap smallIcon;
                     try {
                         largeIcon = Glide.with(context)
                                 .load(artUrl)
@@ -451,9 +483,16 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                                 .error(artResourceId)
                                 .fitCenter()
                                 .into(largeIconWidth, largeIconHeight).get();
+                        smallIcon = Glide.with(context)
+                                .load(artUrl)
+                                .asBitmap()
+                                .error(artResourceId)
+                                .fitCenter()
+                                .into(smallIconWidth, smallIconHeight).get();
                     } catch (InterruptedException | ExecutionException e) {
                         Log.e(LOG_TAG, "Error retrieving large icon from " + artUrl, e);
                         largeIcon = BitmapFactory.decodeResource(resources, artResourceId);
+                        smallIcon = BitmapFactory.decodeResource(resources,artResourceId);
                     }
                     String title = context.getString(R.string.app_name);
 
@@ -462,6 +501,10 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                             desc,
                             Utility.formatTemperature(context, high),
                             Utility.formatTemperature(context, low));
+
+                    sendWeatherDataToWatchFace(weatherId,
+                                        Utility.formatTemperature(context,high),
+                                        Utility.formatTemperature(context,low));
 
                     // NotificationCompatBuilder is a very convenient way to build backward-compatible
                     // notifications.  Just throw in some data.
@@ -472,6 +515,21 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                                     .setLargeIcon(largeIcon)
                                     .setContentTitle(title)
                                     .setContentText(contentText);
+
+                    // Create a big text style for the second page
+                    NotificationCompat.BigTextStyle secondPageStyle = new NotificationCompat.BigTextStyle();
+                    secondPageStyle.setBigContentTitle("Page 2")
+                            .bigText("A lot of text...");
+
+                   // Create second page notification
+                    Notification secondPageNotification =
+                            new NotificationCompat.Builder(context)
+                                    .setStyle(secondPageStyle)
+                                    .build();
+
+                    Notification notification = mBuilder.extend(
+                            new NotificationCompat.WearableExtender().addPage(secondPageNotification))
+                            .build();
 
                     // Make something interesting happen when the user clicks on the notification.
                     // In this case, opening the app is sufficient.
@@ -493,7 +551,7 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                     NotificationManager mNotificationManager =
                             (NotificationManager) getContext().getSystemService(Context.NOTIFICATION_SERVICE);
                     // WEATHER_NOTIFICATION_ID allows you to update the notification later on.
-                    mNotificationManager.notify(WEATHER_NOTIFICATION_ID, mBuilder.build());
+                    mNotificationManager.notify(WEATHER_NOTIFICATION_ID, notification);
 
                     //refreshing last sync
                     SharedPreferences.Editor editor = prefs.edit();
@@ -501,7 +559,7 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                     editor.commit();
                 }
                 cursor.close();
-            }
+            //}
         }
     }
 
@@ -658,4 +716,33 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
         spe.putInt(c.getString(R.string.pref_location_status_key), locationStatus);
         spe.commit();
     }
+
+    public void sendWeatherDataToWatchFace(int descriptionIcon, String high, String low) {
+        PutDataMapRequest putDataMapRequest = PutDataMapRequest.create("/weather-data");
+
+        putDataMapRequest.getDataMap().putInt("descIcon", descriptionIcon);
+        putDataMapRequest.getDataMap().putString("high", high);
+        putDataMapRequest.getDataMap().putString("low", low);
+        putDataMapRequest.getDataMap().putLong("time", new Date().getTime());
+
+        PutDataRequest request = putDataMapRequest.asPutDataRequest();
+        Wearable.DataApi.putDataItem(mGoogleApiClient,request)
+                .setResultCallback(new ResultCallback<DataApi.DataItemResult>() {
+                    @Override
+                    public void onResult(DataApi.DataItemResult dataItemResult) {
+                        if (dataItemResult.getStatus().isSuccess()) {
+                            Log.d("SunshineSyncAdapter", "data sent");
+                        } else {
+                            Log.d("SunshineSyncAdapter", "data not sent");
+                        }
+                    }
+                });
+    }
+
+    private static Asset createAssetFromBitmap(Bitmap bitmap) {
+        final ByteArrayOutputStream byteStream = new ByteArrayOutputStream();
+        bitmap.compress(Bitmap.CompressFormat.PNG, 100, byteStream);
+        return Asset.createFromBytes(byteStream.toByteArray());
+    }
+
 }
